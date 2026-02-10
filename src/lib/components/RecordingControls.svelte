@@ -1,33 +1,58 @@
 <script lang="ts">
-  import { Mic, MicOff, Pause, Play, Square, Loader2 } from 'lucide-svelte';
+  import { Mic, MicOff, Pause, Play, Square, Loader2, Users } from 'lucide-svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { onMount, onDestroy } from 'svelte';
   import { recordingState, currentMeeting } from '$lib/stores';
-  import type { Meeting } from '$lib/types';
+  import { startDualRecording, stopDualRecording } from '$lib/api';
+  import type { Meeting, DualRecordingStatus, AudioSourceError } from '$lib/types';
 
   let isLoading = false;
   let error: string | null = null;
+  let audioSourceWarning: string | null = null;
+  let unlisten: (() => void) | null = null;
+
+  onMount(async () => {
+    // Listen for audio source errors
+    unlisten = await listen<AudioSourceError>('audio-source-error', (event) => {
+      const { source, error: errMsg, recording_continues } = event.payload;
+      if (recording_continues) {
+        audioSourceWarning = `${source === 'mic' ? 'Microphone' : 'System audio'} error: ${errMsg}. Recording continues with available source.`;
+      } else {
+        error = `${source === 'mic' ? 'Microphone' : 'System audio'} failed: ${errMsg}`;
+      }
+    });
+  });
+
+  onDestroy(() => {
+    if (unlisten) unlisten();
+  });
 
   async function startRecording() {
     if (isLoading) return;
     isLoading = true;
     error = null;
+    audioSourceWarning = null;
 
     try {
       // Create a new meeting first
       const meeting: Meeting = await invoke('create_meeting', {
         title: `Meeting ${new Date().toLocaleString()}`,
       });
-      
+
       currentMeeting.set(meeting);
-      
-      // Start recording
-      const audioPath: string = await invoke('start_recording', {
-        meetingId: meeting.id,
-      });
-      
+
+      // Start dual recording
+      const status: DualRecordingStatus = await startDualRecording(meeting.id);
+
       recordingState.setState({
         state: 'recording',
         meeting_id: meeting.id,
+        is_dual_mode: true,
+        mic_active: status.mic_active,
+        system_active: status.system_active,
+        mic_device: status.mic_device,
+        system_device: status.system_device,
       });
     } catch (e) {
       error = String(e);
@@ -43,16 +68,13 @@
     error = null;
 
     try {
-      const [meetingId, duration]: [string, number] = await invoke('stop_recording');
-      
-      recordingState.setState({
-        state: 'idle',
-        meeting_id: null,
-      });
-      
+      const result = await stopDualRecording();
+
+      recordingState.reset();
+
       // Update the meeting with duration
       if ($currentMeeting) {
-        currentMeeting.update(m => m ? { ...m, duration } : null);
+        currentMeeting.update(m => m ? { ...m, duration_secs: result.duration_secs } : null);
       }
     } catch (e) {
       error = String(e);
@@ -98,13 +120,17 @@
     <div class="text-red-500 text-sm">{error}</div>
   {/if}
 
+  {#if audioSourceWarning}
+    <div class="text-amber-500 text-sm bg-amber-500/10 px-3 py-2 rounded-lg">{audioSourceWarning}</div>
+  {/if}
+
   <div class="flex items-center gap-3">
     {#if $recordingState.state === 'idle'}
       <button
         class="btn-primary w-16 h-16 rounded-full shadow-lg hover:shadow-xl transform hover:scale-105"
         on:click={startRecording}
         disabled={isLoading}
-        title="Start Recording"
+        title="Start Dual Recording (Mic + System Audio)"
       >
         {#if isLoading}
           <Loader2 class="w-8 h-8 animate-spin" />
@@ -121,7 +147,7 @@
       >
         <Pause class="w-6 h-6" />
       </button>
-      
+
       <button
         class="btn-danger w-16 h-16 rounded-full shadow-lg animate-pulse"
         on:click={stopRecording}
@@ -143,7 +169,7 @@
       >
         <Play class="w-6 h-6" />
       </button>
-      
+
       <button
         class="btn-danger w-16 h-16 rounded-full shadow-lg"
         on:click={stopRecording}
@@ -160,9 +186,23 @@
   </div>
 
   {#if $recordingState.state === 'recording'}
-    <div class="flex items-center gap-2 text-red-500">
-      <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
-      <span class="text-sm font-medium">Recording...</span>
+    <div class="flex flex-col items-center gap-2">
+      <div class="flex items-center gap-2 text-red-500">
+        <div class="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+        <span class="text-sm font-medium">Recording...</span>
+      </div>
+      {#if $recordingState.is_dual_mode}
+        <div class="flex items-center gap-4 text-xs text-gray-400">
+          <div class="flex items-center gap-1" class:text-green-400={$recordingState.mic_active} class:text-red-400={!$recordingState.mic_active}>
+            <Mic class="w-3 h-3" />
+            <span>Mic</span>
+          </div>
+          <div class="flex items-center gap-1" class:text-green-400={$recordingState.system_active} class:text-red-400={!$recordingState.system_active}>
+            <Users class="w-3 h-3" />
+            <span>System</span>
+          </div>
+        </div>
+      {/if}
     </div>
   {:else if $recordingState.state === 'paused'}
     <div class="flex items-center gap-2 text-amber-500">

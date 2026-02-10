@@ -8,6 +8,37 @@ use std::fs::File;
 use serde_json::json;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AudioDevice {
+    pub index: usize,
+    pub name: String,
+    pub is_monitor: bool,
+}
+
+/// List all available audio input devices including PulseAudio/PipeWire monitor sources
+pub fn list_audio_devices() -> anyhow::Result<Vec<AudioDevice>> {
+    let host = cpal::default_host();
+    let mut devices = Vec::new();
+
+    for (index, device) in host.input_devices()?.enumerate() {
+        if let Ok(name) = device.name() {
+            // Monitor sources on PulseAudio/PipeWire contain "Monitor" in their name
+            let is_monitor = name.to_lowercase().contains("monitor");
+            devices.push(AudioDevice { index, name, is_monitor });
+        }
+    }
+
+    Ok(devices)
+}
+
+/// Get an input device by index
+fn get_device_by_index(index: usize) -> anyhow::Result<cpal::Device> {
+    let host = cpal::default_host();
+    host.input_devices()?
+        .nth(index)
+        .ok_or_else(|| anyhow::anyhow!("Device with index {} not found", index))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RecordingState {
     Idle,
@@ -21,6 +52,7 @@ pub struct AudioRecorder {
     current_meeting_id: Option<String>,
     sample_rate: u32,
     is_recording: Arc<AtomicBool>,
+    selected_device_index: Option<usize>,
 }
 
 impl AudioRecorder {
@@ -31,7 +63,16 @@ impl AudioRecorder {
             current_meeting_id: None,
             sample_rate: 16000,
             is_recording: Arc::new(AtomicBool::new(false)),
+            selected_device_index: None,
         }
+    }
+
+    pub fn set_device(&mut self, device_index: Option<usize>) {
+        self.selected_device_index = device_index;
+    }
+
+    pub fn get_selected_device(&self) -> Option<usize> {
+        self.selected_device_index
     }
 
     pub fn get_state(&self) -> serde_json::Value {
@@ -57,12 +98,13 @@ impl AudioRecorder {
         let audio_path = self.audio_dir.join(format!("{}.wav", meeting_id));
         let target_sample_rate = self.sample_rate;
         let is_recording = Arc::clone(&self.is_recording);
+        let device_index = self.selected_device_index;
 
         let audio_path_clone = audio_path.clone();
 
         // Spawn recording in a separate thread (cpal needs to run on a real thread, not tokio)
         thread::spawn(move || {
-            if let Err(e) = record_from_microphone(audio_path_clone, target_sample_rate, is_recording) {
+            if let Err(e) = record_from_device(audio_path_clone, target_sample_rate, is_recording, device_index) {
                 eprintln!("Audio recording error: {}", e);
             }
         });
@@ -116,14 +158,20 @@ impl AudioRecorder {
     }
 }
 
-fn record_from_microphone(
+fn record_from_device(
     output_path: PathBuf,
     target_sample_rate: u32,
     is_recording: Arc<AtomicBool>,
+    device_index: Option<usize>,
 ) -> anyhow::Result<()> {
     let host = cpal::default_host();
-    let device = host.default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("No input device available"))?;
+
+    // Select device by index or fall back to default
+    let device = match device_index {
+        Some(idx) => get_device_by_index(idx)?,
+        None => host.default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("No input device available"))?,
+    };
 
     let config = device.default_input_config()?;
     let input_sample_rate = config.sample_rate().0;

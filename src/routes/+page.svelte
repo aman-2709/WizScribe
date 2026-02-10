@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { meetings, templates, isRecording, recordingTime } from '$lib/stores';
-  import { listMeetings, listTemplates, createMeeting, startRecording, stopRecording, isRecording as checkIsRecording } from '$lib/api';
+  import { listMeetings, listTemplates, createMeeting, startDualRecording, stopDualRecording, isRecording as checkIsRecording } from '$lib/api';
   import { Mic, Plus, Calendar, Clock, FileText, ChevronRight, Settings } from 'lucide-svelte';
   import { goto } from '$app/navigation';
 
   let newMeetingTitle = '';
   let showNewMeetingForm = false;
   let recordingInterval: ReturnType<typeof setInterval> | null = null;
+  let recordingError: string | null = null;
 
   onMount(async () => {
     try {
@@ -60,26 +61,31 @@
 
   async function handleStartRecording() {
     if (!newMeetingTitle.trim()) return;
-    
+    recordingError = null;
+
     try {
       const meeting = await createMeeting(newMeetingTitle);
       meetings.update(m => [meeting, ...m]);
+
+      console.log('Starting dual recording for meeting:', meeting.id);
+      await startDualRecording(meeting.id);
+      console.log('Recording started successfully');
+
       newMeetingTitle = '';
       showNewMeetingForm = false;
-      
-      await startRecording(meeting.id);
       isRecording.set(true);
       startRecordingTimer();
-      
+
       goto(`/meeting/${meeting.id}`);
     } catch (e) {
       console.error('Failed to start recording:', e);
+      recordingError = String(e);
     }
   }
 
   async function handleStopRecording() {
     try {
-      await stopRecording();
+      await stopDualRecording();
       isRecording.set(false);
       stopRecordingTimer();
     } catch (e) {
@@ -249,6 +255,12 @@
         on:keydown={(e) => e.key === 'Enter' && handleCreateMeeting()}
         autofocus
       />
+
+      {#if recordingError}
+        <div class="mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-sm">
+          {recordingError}
+        </div>
+      {/if}
       
       <div class="flex gap-3">
         <button

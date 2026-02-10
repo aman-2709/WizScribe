@@ -1,5 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Meeting, Note, Template } from '$lib/types';
+import type {
+  Meeting,
+  Note,
+  Template,
+  AudioDevice,
+  DualAudioConfig,
+  DualRecordingStatus,
+  DualRecordingResult,
+  SpeakerTranscript
+} from '$lib/types';
 
 // Meeting API
 export async function createMeeting(title: string): Promise<Meeting> {
@@ -49,6 +58,58 @@ export async function getRecordingState(): Promise<{ state: string; meeting_id: 
 export async function isRecording(): Promise<boolean> {
   const state = await getRecordingState();
   return state.state === 'recording';
+}
+
+// Audio Device API
+export async function listAudioDevices(): Promise<AudioDevice[]> {
+  return invoke('list_audio_devices');
+}
+
+export async function setRecordingDevice(deviceIndex: number | null): Promise<void> {
+  return invoke('set_recording_device', { deviceIndex });
+}
+
+export async function getSelectedAudioDevice(): Promise<number | null> {
+  return invoke('get_selected_audio_device');
+}
+
+// Dual Audio API
+export async function startDualRecording(meetingId: string): Promise<DualRecordingStatus> {
+  return invoke('start_dual_recording', { meetingId });
+}
+
+export async function stopDualRecording(): Promise<DualRecordingResult> {
+  return invoke('stop_dual_recording');
+}
+
+export async function getDualAudioConfig(): Promise<DualAudioConfig> {
+  return invoke('get_dual_audio_config');
+}
+
+export async function setDualAudioConfig(
+  micDeviceIndex: number | null,
+  systemDeviceIndex: number | null
+): Promise<void> {
+  return invoke('set_dual_audio_config', { micDeviceIndex, systemDeviceIndex });
+}
+
+export async function getAudioDevicesByType(deviceType: 'microphone' | 'monitor'): Promise<AudioDevice[]> {
+  return invoke('get_audio_devices_by_type', { deviceType });
+}
+
+export async function transcribeDualAudio(meetingId: string, audioPath: string): Promise<SpeakerTranscript> {
+  return invoke('transcribe_dual_audio', { meetingId, audioPath });
+}
+
+export async function getDualRecordingState(): Promise<{
+  is_recording: boolean;
+  mic_active: boolean;
+  system_active: boolean;
+  mic_device: string | null;
+  system_device: string | null;
+  meeting_id: string | null;
+}> {
+  return invoke('get_dual_recording_state');
 }
 
 // Transcript API

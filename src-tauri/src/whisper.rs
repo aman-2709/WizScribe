@@ -219,6 +219,74 @@ pub struct TranscriptionSegment {
     pub text: String,
 }
 
+/// Split a stereo WAV file into left and right channel mono files
+/// Returns paths to temporary left and right channel files
+pub fn split_stereo_channels(stereo_path: &str) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    use std::io::BufWriter;
+    use std::fs::File;
+    use hound::WavWriter;
+
+    let mut reader = WavReader::open(stereo_path)?;
+    let spec = reader.spec();
+
+    if spec.channels != 2 {
+        return Err(anyhow::anyhow!("Not a stereo file: {} channels", spec.channels));
+    }
+
+    // Create temp directory for channel files
+    let temp_dir = tempfile::tempdir()?;
+    let left_path = temp_dir.path().join("left.wav");
+    let right_path = temp_dir.path().join("right.wav");
+
+    // Create mono specs
+    let mono_spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: spec.sample_rate,
+        bits_per_sample: spec.bits_per_sample,
+        sample_format: spec.sample_format,
+    };
+
+    let left_file = File::create(&left_path)?;
+    let right_file = File::create(&right_path)?;
+    let mut left_writer = WavWriter::new(BufWriter::new(left_file), mono_spec)?;
+    let mut right_writer = WavWriter::new(BufWriter::new(right_file), mono_spec)?;
+
+    // Read interleaved samples and split
+    match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let samples: Vec<i32> = reader.samples::<i32>().filter_map(|s| s.ok()).collect();
+            for chunk in samples.chunks_exact(2) {
+                left_writer.write_sample(chunk[0])?;
+                right_writer.write_sample(chunk[1])?;
+            }
+        }
+        hound::SampleFormat::Float => {
+            let samples: Vec<f32> = reader.samples::<f32>().filter_map(|s| s.ok()).collect();
+            for chunk in samples.chunks_exact(2) {
+                left_writer.write_sample(chunk[0])?;
+                right_writer.write_sample(chunk[1])?;
+            }
+        }
+    }
+
+    left_writer.finalize()?;
+    right_writer.finalize()?;
+
+    // Leak the temp directory to prevent cleanup (files need to persist)
+    std::mem::forget(temp_dir);
+
+    Ok((left_path, right_path))
+}
+
+/// Check if a WAV file is stereo
+pub fn is_stereo_file(audio_path: &str) -> bool {
+    if let Ok(reader) = WavReader::open(audio_path) {
+        reader.spec().channels == 2
+    } else {
+        false
+    }
+}
+
 pub fn parse_transcript_to_segments(transcript: &str) -> Vec<TranscriptionSegment> {
     use regex::Regex;
     

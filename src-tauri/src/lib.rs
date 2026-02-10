@@ -3,16 +3,20 @@ pub mod db;
 pub mod whisper;
 pub mod ai;
 pub mod config;
+pub mod dual_audio;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::Manager;
 
+use dual_audio::{DualAudioRecorder, DualRecordingStatus, DualRecordingResult, SpeakerTranscript, SpeakerSegment};
+
 // Application state
 pub struct AppState {
     pub db: Arc<Mutex<Option<db::Database>>>,
     pub audio: Arc<Mutex<audio::AudioRecorder>>,
+    pub dual_audio: Arc<Mutex<DualAudioRecorder>>,
     pub whisper: Arc<Mutex<whisper::WhisperTranscriber>>,
     pub ai: Arc<Mutex<ai::AIClient>>,
     pub config: Arc<Mutex<config::AppConfig>>,
@@ -93,8 +97,270 @@ async fn resume_recording(state: tauri::State<'_, AppState>) -> Result<(), Strin
 
 #[tauri::command]
 async fn get_recording_state(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    // Check dual audio state first
+    let dual_audio = state.dual_audio.lock().await;
+    let dual_status = dual_audio.get_status();
+
+    // If dual audio is recording, return that state
+    if dual_status.get("is_recording").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Ok(serde_json::json!({
+            "state": "recording",
+            "meeting_id": dual_status.get("meeting_id"),
+            "is_dual_mode": true,
+            "mic_active": dual_status.get("mic_active"),
+            "system_active": dual_status.get("system_active"),
+            "mic_device": dual_status.get("mic_device"),
+            "system_device": dual_status.get("system_device"),
+        }));
+    }
+    drop(dual_audio);
+
+    // Fall back to legacy single audio state
     let audio = state.audio.lock().await;
-    Ok(audio.get_state())
+    let legacy_state = audio.get_state();
+    let state_str = legacy_state.get("state").and_then(|v| v.as_str()).unwrap_or("idle");
+
+    Ok(serde_json::json!({
+        "state": state_str,
+        "meeting_id": legacy_state.get("meeting_id"),
+        "is_dual_mode": false,
+        "mic_active": state_str == "recording",
+        "system_active": false,
+        "mic_device": null,
+        "system_device": null,
+    }))
+}
+
+#[tauri::command]
+async fn list_audio_devices() -> Result<Vec<audio::AudioDevice>, String> {
+    audio::list_audio_devices().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_recording_device(
+    state: tauri::State<'_, AppState>,
+    device_index: Option<usize>,
+) -> Result<(), String> {
+    let mut audio = state.audio.lock().await;
+    audio.set_device(device_index);
+
+    // Persist to config
+    let mut config = state.config.lock().await;
+    config.selected_audio_device = device_index;
+    config.save().await.map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_selected_audio_device(state: tauri::State<'_, AppState>) -> Result<Option<usize>, String> {
+    let audio = state.audio.lock().await;
+    Ok(audio.get_selected_device())
+}
+
+// ===== Dual Audio Commands =====
+
+#[tauri::command]
+async fn start_dual_recording(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<DualRecordingStatus, String> {
+    let config = state.config.lock().await;
+    let mic_device_index = config.mic_device_index;
+    let system_device_index = config.system_device_index;
+    drop(config);
+
+    let mut dual_audio = state.dual_audio.lock().await;
+    dual_audio.start(&meeting_id, mic_device_index, system_device_index)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stop_dual_recording(
+    state: tauri::State<'_, AppState>,
+) -> Result<DualRecordingResult, String> {
+    let result = {
+        let mut dual_audio = state.dual_audio.lock().await;
+        dual_audio.stop().await.map_err(|e| e.to_string())?
+    };
+
+    // Get the audio path
+    let app_data_dir = get_app_data_dir();
+    let audio_path = app_data_dir.join("audio").join(format!("{}.wav", result.meeting_id));
+    let audio_path_str = audio_path.to_string_lossy().to_string();
+
+    // Update meeting with audio path and duration
+    let db = state.db.lock().await;
+    if let Some(db) = db.as_ref() {
+        if let Err(e) = db.update_meeting_audio(&result.meeting_id, &audio_path_str, result.duration_secs as i64).await {
+            eprintln!("Failed to update meeting audio: {}", e);
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+async fn get_dual_audio_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let config = state.config.lock().await;
+    Ok(serde_json::json!({
+        "mic_device_index": config.mic_device_index,
+        "system_device_index": config.system_device_index,
+    }))
+}
+
+#[tauri::command]
+async fn set_dual_audio_config(
+    state: tauri::State<'_, AppState>,
+    mic_device_index: Option<usize>,
+    system_device_index: Option<usize>,
+) -> Result<(), String> {
+    // Validate devices if provided
+    let devices = audio::list_audio_devices().map_err(|e| e.to_string())?;
+
+    if let Some(mic_idx) = mic_device_index {
+        if mic_idx >= devices.len() {
+            return Err("Invalid mic device index".to_string());
+        }
+    }
+
+    if let Some(system_idx) = system_device_index {
+        if system_idx >= devices.len() {
+            return Err("Invalid system device index".to_string());
+        }
+        // Verify it's a monitor source
+        if !devices[system_idx].is_monitor {
+            return Err("Device is not a monitor source".to_string());
+        }
+    }
+
+    // Update config
+    let mut config = state.config.lock().await;
+    config.mic_device_index = mic_device_index;
+    config.system_device_index = system_device_index;
+    config.save().await.map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_audio_devices_by_type(
+    device_type: String,
+) -> Result<Vec<audio::AudioDevice>, String> {
+    let devices = audio::list_audio_devices().map_err(|e| e.to_string())?;
+
+    let filtered: Vec<audio::AudioDevice> = match device_type.as_str() {
+        "microphone" => devices.into_iter().filter(|d| !d.is_monitor).collect(),
+        "monitor" => devices.into_iter().filter(|d| d.is_monitor).collect(),
+        _ => return Err("Invalid device type. Use 'microphone' or 'monitor'".to_string()),
+    };
+
+    Ok(filtered)
+}
+
+#[tauri::command]
+async fn transcribe_dual_audio(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    audio_path: String,
+) -> Result<SpeakerTranscript, String> {
+    // Check if file exists
+    if !std::path::Path::new(&audio_path).exists() {
+        return Err("Audio file not found".to_string());
+    }
+
+    // Check if stereo
+    if !whisper::is_stereo_file(&audio_path) {
+        return Err("Not a stereo file".to_string());
+    }
+
+    // Split stereo into mono channels
+    let (left_path, right_path) = whisper::split_stereo_channels(&audio_path)
+        .map_err(|e| format!("Failed to split channels: {}", e))?;
+
+    let whisper = state.whisper.lock().await;
+
+    // Transcribe both channels (sequentially for now, could be parallelized)
+    let left_transcript = whisper.transcribe(left_path.to_string_lossy().as_ref())
+        .await
+        .map_err(|e| format!("Failed to transcribe mic channel: {}", e))?;
+
+    let right_transcript = whisper.transcribe(right_path.to_string_lossy().as_ref())
+        .await
+        .map_err(|e| format!("Failed to transcribe system channel: {}", e))?;
+
+    // Parse transcripts into segments
+    let mic_segments: Vec<SpeakerSegment> = whisper::parse_transcript_to_segments(&left_transcript)
+        .into_iter()
+        .map(|s| SpeakerSegment {
+            speaker: "Me".to_string(),
+            text: s.text,
+            start_ms: s.start_ms as u64,
+            end_ms: s.end_ms as u64,
+            is_overlapping: false,
+        })
+        .collect();
+
+    let system_segments: Vec<SpeakerSegment> = whisper::parse_transcript_to_segments(&right_transcript)
+        .into_iter()
+        .map(|s| SpeakerSegment {
+            speaker: "Them".to_string(),
+            text: s.text,
+            start_ms: s.start_ms as u64,
+            end_ms: s.end_ms as u64,
+            is_overlapping: false,
+        })
+        .collect();
+
+    // Get device names from config
+    let config = state.config.lock().await;
+    let devices = audio::list_audio_devices().unwrap_or_default();
+
+    let mic_name = config.mic_device_index
+        .and_then(|idx| devices.get(idx))
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| "Microphone".to_string());
+
+    let system_name = config.system_device_index
+        .and_then(|idx| devices.get(idx))
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| "System Audio".to_string());
+
+    // Merge segments with overlap detection
+    let merged_segments = SpeakerTranscript::merge(mic_segments, system_segments);
+
+    let transcript = SpeakerTranscript {
+        version: 1,
+        mic_device: mic_name,
+        system_device: system_name,
+        has_dual_audio: true,
+        segments: merged_segments,
+    };
+
+    // Store as JSON in database
+    let transcript_json = serde_json::to_string(&transcript)
+        .map_err(|e| format!("Failed to serialize transcript: {}", e))?;
+
+    let db = state.db.lock().await;
+    if let Some(db) = db.as_ref() {
+        let _ = db.update_meeting_transcript(&meeting_id, &transcript_json).await;
+    }
+
+    // Cleanup temp files
+    let _ = std::fs::remove_file(&left_path);
+    let _ = std::fs::remove_file(&right_path);
+
+    Ok(transcript)
+}
+
+#[tauri::command]
+async fn get_dual_recording_state(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let dual_audio = state.dual_audio.lock().await;
+    Ok(dual_audio.get_status())
 }
 
 // ===== Transcription Commands =====
@@ -259,7 +525,8 @@ pub fn run() {
             // Initialize state
             let state = AppState {
                 db: Arc::new(Mutex::new(None)),
-                audio: Arc::new(Mutex::new(audio::AudioRecorder::new(audio_dir))),
+                audio: Arc::new(Mutex::new(audio::AudioRecorder::new(audio_dir.clone()))),
+                dual_audio: Arc::new(Mutex::new(dual_audio::DualAudioRecorder::new(audio_dir))),
                 whisper: Arc::new(Mutex::new(
                     whisper::WhisperTranscriber::new().expect("Failed to create WhisperTranscriber")
                 )),
@@ -297,6 +564,13 @@ pub fn run() {
                     }
                 }
 
+                // Restore audio device selection
+                if let Some(device_index) = loaded_config.selected_audio_device {
+                    let mut audio = state.audio.lock().await;
+                    audio.set_device(Some(device_index));
+                    println!("Audio device restored from config: index {}", device_index);
+                }
+
                 // Initialize database
                 match db::Database::new(&db_path_str).await {
                     Ok(database) => {
@@ -324,6 +598,17 @@ pub fn run() {
             pause_recording,
             resume_recording,
             get_recording_state,
+            list_audio_devices,
+            set_recording_device,
+            get_selected_audio_device,
+            // Dual audio commands
+            start_dual_recording,
+            stop_dual_recording,
+            get_dual_audio_config,
+            set_dual_audio_config,
+            get_audio_devices_by_type,
+            transcribe_dual_audio,
+            get_dual_recording_state,
             // Transcription commands
             transcribe_audio,
             is_whisper_model_available,

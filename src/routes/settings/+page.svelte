@@ -1,9 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { ArrowLeft, Key, Plus, Trash2, Check } from 'lucide-svelte';
+  import { ArrowLeft, Key, Plus, Trash2, Check, Mic, Users } from 'lucide-svelte';
   import { goto } from '$app/navigation';
-  import type { Template } from '$lib/types';
+  import type { Template, AudioDevice, DualAudioConfig } from '$lib/types';
+  import {
+    listAudioDevices,
+    setRecordingDevice,
+    getSelectedAudioDevice,
+    getAudioDevicesByType,
+    getDualAudioConfig,
+    setDualAudioConfig
+  } from '$lib/api';
 
   let apiKey = '';
   let provider: 'openai' | 'anthropic' = 'openai';
@@ -13,8 +21,22 @@
   let hasApiKey = false;
   let saving = false;
 
+  // Audio device state (legacy single device)
+  let audioDevices: AudioDevice[] = [];
+  let selectedDeviceIndex: number | null = null;
+  let loadingDevices = false;
+  let savingDevice = false;
+
+  // Dual audio device state
+  let microphoneDevices: AudioDevice[] = [];
+  let monitorDevices: AudioDevice[] = [];
+  let selectedMicIndex: number | null = null;
+  let selectedSystemIndex: number | null = null;
+  let loadingDualDevices = false;
+  let savingDualConfig = false;
+
   onMount(async () => {
-    await Promise.all([loadTemplates(), loadAiConfig()]);
+    await Promise.all([loadTemplates(), loadAiConfig(), loadAudioDevices(), loadDualAudioDevices()]);
   });
 
   async function loadAiConfig() {
@@ -28,6 +50,88 @@
       }
     } catch (e) {
       console.error('Failed to load AI config:', e);
+    }
+  }
+
+  async function loadAudioDevices() {
+    loadingDevices = true;
+    try {
+      audioDevices = await listAudioDevices();
+      selectedDeviceIndex = await getSelectedAudioDevice();
+    } catch (e) {
+      console.error('Failed to load audio devices:', e);
+    } finally {
+      loadingDevices = false;
+    }
+  }
+
+  async function loadDualAudioDevices() {
+    loadingDualDevices = true;
+    try {
+      const [mics, monitors, config] = await Promise.all([
+        getAudioDevicesByType('microphone'),
+        getAudioDevicesByType('monitor'),
+        getDualAudioConfig()
+      ]);
+      microphoneDevices = mics;
+      monitorDevices = monitors;
+      selectedMicIndex = config.mic_device_index;
+      selectedSystemIndex = config.system_device_index;
+    } catch (e) {
+      console.error('Failed to load dual audio devices:', e);
+    } finally {
+      loadingDualDevices = false;
+    }
+  }
+
+  async function handleDeviceChange(event: Event) {
+    const select = event.target as HTMLSelectElement;
+    const value = select.value;
+    const deviceIndex = value === 'default' ? null : parseInt(value, 10);
+
+    savingDevice = true;
+    try {
+      await setRecordingDevice(deviceIndex);
+      selectedDeviceIndex = deviceIndex;
+    } catch (e) {
+      console.error('Failed to set audio device:', e);
+      alert('Failed to set audio device: ' + e);
+    } finally {
+      savingDevice = false;
+    }
+  }
+
+  async function handleMicChange(event: Event) {
+    const select = event.target as HTMLSelectElement;
+    const value = select.value;
+    const deviceIndex = value === 'auto' ? null : parseInt(value, 10);
+
+    savingDualConfig = true;
+    try {
+      await setDualAudioConfig(deviceIndex, selectedSystemIndex);
+      selectedMicIndex = deviceIndex;
+    } catch (e) {
+      console.error('Failed to set microphone device:', e);
+      alert('Failed to set microphone device: ' + e);
+    } finally {
+      savingDualConfig = false;
+    }
+  }
+
+  async function handleSystemChange(event: Event) {
+    const select = event.target as HTMLSelectElement;
+    const value = select.value;
+    const deviceIndex = value === 'auto' ? null : parseInt(value, 10);
+
+    savingDualConfig = true;
+    try {
+      await setDualAudioConfig(selectedMicIndex, deviceIndex);
+      selectedSystemIndex = deviceIndex;
+    } catch (e) {
+      console.error('Failed to set system audio device:', e);
+      alert('Failed to set system audio device: ' + e);
+    } finally {
+      savingDualConfig = false;
     }
   }
 
@@ -153,6 +257,95 @@
         disabled={saving || !apiKey.trim()}
       >
         {saving ? 'Saving...' : 'Save API Key'}
+      </button>
+    </div>
+  </div>
+
+  <!-- Dual Audio Configuration -->
+  <div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-6">
+    <div class="flex items-center gap-3 mb-6">
+      <div class="w-10 h-10 bg-green-600 rounded-lg flex items-center justify-center">
+        <Mic class="w-5 h-5 text-white" />
+      </div>
+      <div>
+        <h2 class="text-lg font-medium text-white">Audio Sources</h2>
+        <p class="text-sm text-gray-400">Configure microphone and system audio for speaker identification</p>
+      </div>
+    </div>
+
+    <div class="space-y-6">
+      <!-- Microphone Selection -->
+      <div>
+        <label for="mic-device-select" class="block text-sm font-medium text-gray-300 mb-2">
+          <span class="flex items-center gap-2">
+            <Mic class="w-4 h-4" />
+            Microphone (Your voice - "Me")
+          </span>
+        </label>
+        {#if loadingDualDevices}
+          <div class="text-gray-400 text-sm">Loading devices...</div>
+        {:else}
+          <select
+            id="mic-device-select"
+            value={selectedMicIndex === null ? 'auto' : selectedMicIndex.toString()}
+            on:change={handleMicChange}
+            disabled={savingDualConfig}
+            class="w-full px-4 py-2.5 rounded-lg border border-gray-600 bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50"
+          >
+            <option value="auto">Auto-detect (first available)</option>
+            {#each microphoneDevices as device}
+              <option value={device.index.toString()}>
+                {device.name}
+              </option>
+            {/each}
+          </select>
+        {/if}
+        <p class="text-xs text-gray-500 mt-2">
+          Select your microphone input device. Speech from this source will be labeled as "Me" in transcripts.
+        </p>
+      </div>
+
+      <!-- System Audio Selection -->
+      <div>
+        <label for="system-device-select" class="block text-sm font-medium text-gray-300 mb-2">
+          <span class="flex items-center gap-2">
+            <Users class="w-4 h-4" />
+            System Audio (Meeting participants - "Them")
+          </span>
+        </label>
+        {#if loadingDualDevices}
+          <div class="text-gray-400 text-sm">Loading devices...</div>
+        {:else if monitorDevices.length === 0}
+          <div class="text-amber-400 text-sm bg-amber-400/10 px-3 py-2 rounded-lg">
+            No monitor sources available. Make sure PulseAudio or PipeWire is configured correctly.
+          </div>
+        {:else}
+          <select
+            id="system-device-select"
+            value={selectedSystemIndex === null ? 'auto' : selectedSystemIndex.toString()}
+            on:change={handleSystemChange}
+            disabled={savingDualConfig}
+            class="w-full px-4 py-2.5 rounded-lg border border-gray-600 bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          >
+            <option value="auto">Auto-detect (first monitor)</option>
+            {#each monitorDevices as device}
+              <option value={device.index.toString()}>
+                {device.name}
+              </option>
+            {/each}
+          </select>
+        {/if}
+        <p class="text-xs text-gray-500 mt-2">
+          Select a monitor source to capture audio from video calls (Teams, Zoom, Meet). Speech from this source will be labeled as "Them".
+        </p>
+      </div>
+
+      <button
+        class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition-colors"
+        on:click={loadDualAudioDevices}
+        disabled={loadingDualDevices}
+      >
+        {loadingDualDevices ? 'Refreshing...' : 'Refresh Devices'}
       </button>
     </div>
   </div>

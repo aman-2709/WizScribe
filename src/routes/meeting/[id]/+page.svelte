@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { currentMeeting, currentNote, isRecording, recordingTime, isTranscribing, isGeneratingSummary } from '$lib/stores';
-  import { getMeeting, getNote, updateNote, startRecording, stopRecording, isRecording as checkIsRecording, transcribeMeeting, generateSummary, askQuestion, draftFollowupEmail, exportToMarkdown } from '$lib/api';
+  import { getMeeting, getNote, updateNote, startDualRecording, stopDualRecording, isRecording as checkIsRecording, transcribeMeeting, generateSummary, askQuestion, draftFollowupEmail, exportToMarkdown } from '$lib/api';
   import type { Meeting, MeetingSummary, ChatMessage } from '$lib/types';
   import { Mic, Square, Play, Pause, FileText, Sparkles, Download, Send, Bot, User, Loader2, ArrowLeft } from 'lucide-svelte';
   import { goto } from '$app/navigation';
@@ -22,6 +22,7 @@
   let showEmailModal = false;
   let draftedEmail = '';
   let recordingInterval: ReturnType<typeof setInterval> | null = null;
+  let recordingError: string | null = null;
 
   onMount(async () => {
     try {
@@ -107,21 +108,25 @@
   }
 
   async function handleStartRecording() {
+    recordingError = null;
     try {
-      await startRecording(meetingId);
+      console.log('Starting dual recording for meeting:', meetingId);
+      const status = await startDualRecording(meetingId);
+      console.log('Recording started:', status);
       isRecording.set(true);
       startRecordingTimer();
     } catch (e) {
       console.error('Failed to start recording:', e);
+      recordingError = String(e);
     }
   }
 
   async function handleStopRecording() {
     try {
-      await stopRecording();
+      await stopDualRecording();
       isRecording.set(false);
       stopRecordingTimer();
-      
+
       // Reload meeting to get updated audio path
       const meeting = await getMeeting(meetingId);
       if (meeting) {
@@ -321,6 +326,12 @@
           <Download class="w-4 h-4" />
         </button>
       </div>
+
+      {#if recordingError}
+        <div class="mt-2 p-2 bg-red-900/50 border border-red-700 rounded-lg text-red-300 text-xs">
+          {recordingError}
+        </div>
+      {/if}
     </div>
 
     <!-- AI Actions -->

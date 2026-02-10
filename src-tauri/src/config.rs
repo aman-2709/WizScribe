@@ -6,6 +6,12 @@ use tokio::fs;
 pub struct AppConfig {
     pub ai_api_key: Option<String>,
     pub ai_provider: Option<String>,
+    /// DEPRECATED: Use mic_device_index instead
+    pub selected_audio_device: Option<usize>,
+    /// Dual audio: microphone device index
+    pub mic_device_index: Option<usize>,
+    /// Dual audio: system audio monitor device index
+    pub system_device_index: Option<usize>,
 }
 
 impl AppConfig {
@@ -25,7 +31,16 @@ impl AppConfig {
 
         match fs::read_to_string(&path).await {
             Ok(content) => {
-                serde_json::from_str(&content).unwrap_or_default()
+                let mut config: Self = serde_json::from_str(&content).unwrap_or_default();
+                // Migrate legacy selected_audio_device to mic_device_index
+                if config.selected_audio_device.is_some() && config.mic_device_index.is_none() {
+                    config.mic_device_index = config.selected_audio_device;
+                    // Save the migrated config
+                    if let Err(e) = config.save().await {
+                        eprintln!("Failed to save migrated config: {}", e);
+                    }
+                }
+                config
             }
             Err(_) => Self::default(),
         }

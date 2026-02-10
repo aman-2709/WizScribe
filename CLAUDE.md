@@ -37,9 +37,11 @@ npm run check:watch   # Watch mode
 - **main.rs**: Minimal entry point, delegates to lib.rs
 - **lib.rs**: Tauri command registration and app setup
 - **audio.rs**: Audio recording via cpal, saves WAV to app data directory
+- **dual_audio.rs**: Dual audio capture (mic + system), stereo WAV output, speaker-attributed transcription
 - **db.rs**: SQLite via sqlx with auto-migrations, tables: `meetings`, `notes`, `templates`
 - **whisper.rs**: Local transcription via whisper-rs, model path: `~/.local/share/wizscribe/models/`
 - **ai.rs**: OpenAI/Anthropic HTTP clients for summaries and chat
+- **config.rs**: App configuration including dual audio device preferences
 
 ### Data Flow
 1. Frontend invokes Tauri command via `api.ts` wrapper
@@ -78,3 +80,15 @@ templates (id TEXT PK, name UNIQUE, structure_json)
 - Node.js v18+
 - System libs: `libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf`
 - Whisper model: Run `./scripts/setup-whisper.sh` or manually place `ggml-base.en.bin` in `~/.local/share/wizscribe/models/`
+
+## Active Technologies
+- Rust 1.75+ (backend), TypeScript 5.6 (frontend), Svelte 5 + cpal 0.15 (audio capture), hound 3 (WAV), whisper-rs 0.14, SvelteKit 2.9 (001-dual-audio-speaker-id)
+- SQLite via sqlx 0.8 (meetings table with speaker-attributed transcript) (001-dual-audio-speaker-id)
+
+## Recent Changes
+- 001-dual-audio-speaker-id: Implemented dual audio capture with speaker identification
+  - New `dual_audio.rs` module for stereo recording (mic + system audio)
+  - Speaker-attributed transcription ("Me" vs "Them" labels)
+  - Settings UI for microphone and system audio device selection
+  - TranscriptViewer with speaker labels and visual distinction
+  - Backward-compatible with existing mono recordings
